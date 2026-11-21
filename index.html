@@ -352,6 +352,25 @@ function totalOf(s, x) {
   customs().forEach(function (k) { if (k.on) t += (s['c_' + k.id] || 0); });
   return Math.min(t, totalMax());
 }
+function letterOf(pct) {
+  pct = Math.round(pct * 100) / 100;
+  if (pct >= 97) return 'A+';
+  if (pct >= 93) return 'A';
+  if (pct >= 90) return 'A-';
+  if (pct >= 84) return 'B+';
+  if (pct >= 80) return 'B';
+  if (pct >= 76) return 'B-';
+  if (pct >= 73) return 'C+';
+  if (pct >= 70) return 'C';
+  if (pct >= 67) return 'C-';
+  if (pct >= 64) return 'D+';
+  if (pct >= 60) return 'D';
+  return 'F';
+}
+function gradeLetter(s, x) {
+  var m = totalMax();
+  return m > 0 ? letterOf((totalOf(s, x) / m) * 100) : '-';
+}
 function headers() {
   var c = comps(), h = ['#', 'الاسم', 'حضر', 'غاب', 'نسبة الحضور'];
   if (c.att.on) h.push(c.att.name + ' من ' + state.max);
@@ -360,7 +379,8 @@ function headers() {
   customs().forEach(function (k) { if (k.on) h.push(k.name + ' من ' + k.max); });
   if (c.adjust.on) h.push(c.adjust.name);
   if (c.total.on) h.push(c.total.name + ' من ' + totalMax());
-  h.push('الحالة');
+  h.push('حالة الغياب');
+  h.push('التقدير');
   return h;
 }
 function renderComps() {
@@ -502,6 +522,10 @@ function renderReport() {
     var td = el('td');
     td.appendChild(el('span', 'badge ' + (x.over ? 'bad' : 'ok'), x.over ? 'تعدّى الغياب' : 'مقبول'));
     r.appendChild(td);
+    td = el('td');
+    var gl = gradeLetter(s, x);
+    td.appendChild(el('span', 'badge ' + (gl === 'F' ? 'bad' : 'ok'), gl));
+    r.appendChild(td);
     var hs = headers();
     Array.prototype.forEach.call(r.children, function (c, ci) { c.setAttribute('data-label', hs[ci] || ''); });
     t.appendChild(r);
@@ -553,7 +577,7 @@ $('max').addEventListener('input', function (e) {
   if (v > 0) { state.max = v; save(); renderReport(); }
 });
 $('copyBtn').addEventListener('click', function () {
-  var lines = [state.name, headers().slice(1, -1).join('\t')];
+  var lines = [state.name, headers().slice(1).join('\t')];
   state.students.forEach(function (s) {
     var x = stats(s);
     var cc = comps(), row = [s.name, x.attended, x.absent, fmt(x.pct) + '%'];
@@ -563,6 +587,8 @@ $('copyBtn').addEventListener('click', function () {
     customs().forEach(function (k) { if (k.on) row.push(s['c_' + k.id] || 0); });
     if (cc.adjust.on) row.push(s.adjust || 0);
     if (cc.total.on) row.push(fmt(totalOf(s, x)));
+    row.push(x.over ? 'تعدّى الغياب' : 'مقبول');
+    row.push(gradeLetter(s, x));
     lines.push(row.join('\t'));
   });
   var txt = lines.join('\n');
@@ -682,6 +708,7 @@ function buildWorkbookForCurrent() {
     if (cc.adjust.on) row.push([r2(s.adjust || 0), num]);
     if (cc.total.on) row.push([r2(totalOf(s, x)), num]);
     row.push([o ? 'تعدّى الغياب' : 'مقبول', num]);
+    row.push([gradeLetter(s, x), num]);
     rep.push(row);
   });
   var rw = [5, 30, 9, 9, 13];
