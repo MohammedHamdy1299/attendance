@@ -171,6 +171,29 @@ tr.over td{background:transparent}
       <div class="scroll"><table id="table"></table></div>
     </div>
     <p><button class="btn ghost" id="copyBtn">نسخ التقرير</button> <button class="btn" id="xlsBtn">تصدير Excel</button> <span class="meta" id="copyMsg"></span> <span class="meta" id="xlsMsg"></span></p>
+    <div class="panel" id="fbPanel">
+      <label>المزامنة التلقائية بين الأجهزة (Firebase)</label>
+      <p class="meta" id="fbStatus" style="margin:0 0 8px;font-weight:700"></p>
+      <div id="fbCfgBox">
+        <p class="meta" style="margin:0 0 8px">الصق هنا إعدادات مشروع Firebase (الأسطر اللي فيها apiKey و databaseURL).</p>
+        <textarea id="fbCfgTa" dir="ltr" placeholder='apiKey: "...", databaseURL: "https://..."'></textarea>
+        <p style="margin:10px 0 0"><button class="btn" id="fbCfgSave">حفظ الإعدادات</button></p>
+      </div>
+      <div id="fbLoginBox" class="hidden">
+        <input type="email" id="fbEmail" dir="ltr" placeholder="البريد الإلكتروني" autocomplete="email">
+        <input type="password" id="fbPass" dir="ltr" placeholder="كلمة المرور (6 أحرف على الأقل)" autocomplete="current-password" style="margin-top:8px">
+        <p style="margin:10px 0 0"><button class="btn" id="fbIn">تسجيل الدخول</button> <button class="btn ghost" id="fbUp">إنشاء حساب جديد</button> <button class="btn ghost" id="fbCfgReset">تغيير الإعدادات</button></p>
+      </div>
+      <div id="fbOnBox" class="hidden">
+        <p class="meta" id="fbWho" style="margin:0 0 8px"></p>
+        <p style="margin:0"><button class="btn" id="fbSyncBtn">مزامنة الآن</button> <button class="btn ghost" id="fbOut">تسجيل الخروج</button></p>
+      </div>
+      <div id="fbConflict" class="warnbox hidden" style="margin:12px 0 0">
+        <span>البيانات اتغيّرت على الجهاز ده وعلى السحابة. النسخة اللي هتختارها هتستبدل التانية.</span>
+        <button class="btn small" id="fbUseCloud">استخدم نسخة السحابة</button>
+        <button class="btn small ghost" id="fbUseLocal">استخدم نسخة هذا الجهاز</button>
+      </div>
+    </div>
     <div class="panel">
       <label for="bk">نسخة احتياطية ونقل البيانات بين الأجهزة</label>
       <p class="meta" id="bkInfo" style="margin:0 0 6px;font-weight:700"></p>
@@ -210,7 +233,7 @@ function cur() {
 var db = loadDb();
 var state = cur();
 var currentSession = null;
-function save() { try { localStorage.setItem(DKEY, JSON.stringify(db)); } catch (e) {} }
+function save() { try { db.updatedAt = Date.now(); localStorage.setItem(DKEY, JSON.stringify(db)); } catch (e) {} if (window.fbAfterSave) window.fbAfterSave(); }
 function $(id) { return document.getElementById(id); }
 function el(tag, cls, text) {
   var e = document.createElement(tag);
@@ -350,7 +373,8 @@ function totalOf(s, x) {
   if (c.assign.on) t += (s.assign || 0);
   if (c.adjust.on) t += (s.adjust || 0);
   customs().forEach(function (k) { if (k.on) t += (s['c_' + k.id] || 0); });
-  return Math.min(t, totalMax());
+  t = Math.min(t, totalMax());
+  return Math.floor(t + 0.5 + 1e-9);
 }
 function letterOf(pct) {
   pct = Math.round(pct * 100) / 100;
@@ -976,8 +1000,187 @@ confirmBtn('delAllSess', 'حذف كل المحاضرات',
     save(); refresh();
   });
 
+/* ===== المزامنة عبر Firebase (REST بدون مكتبات) ===== */
+var FB_CONFIG = { apiKey: '', databaseURL: '' };
+var FB = (function () {
+  var CK = 'att_fb_cfg', AK = 'att_fb_auth', LK = 'att_fb_last';
+  var running = false, again = false, conflictOn = false, timer = null, pending = null;
+  function lsGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } }
+  function lsSet(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function cfg() {
+    if (FB_CONFIG.apiKey && FB_CONFIG.databaseURL) return FB_CONFIG;
+    var c = lsGet(CK);
+    return (c && c.apiKey && c.databaseURL) ? c : null;
+  }
+  function auth() { return lsGet(AK); }
+  function hasData() { return db.subjects.length > 1 || db.subjects.some(function (s) { return s.students.length || s.sessions.length; }); }
+  function rawSave() { try { localStorage.setItem(DKEY, JSON.stringify(db)); } catch (e) {} }
+  function status(t) { var e = $('fbStatus'); if (e) e.textContent = t; }
+  function timeStr() { return new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }); }
+  var ERR = {
+    EMAIL_EXISTS: 'البريد ده مسجّل قبل كده، جرّب تسجيل الدخول.',
+    INVALID_LOGIN_CREDENTIALS: 'البريد أو كلمة المرور غلط.',
+    INVALID_PASSWORD: 'كلمة المرور غلط.',
+    EMAIL_NOT_FOUND: 'البريد ده مش مسجّل، اضغط إنشاء حساب جديد.',
+    INVALID_EMAIL: 'البريد الإلكتروني غير صحيح.',
+    MISSING_PASSWORD: 'اكتب كلمة المرور.',
+    WEAK_PASSWORD: 'كلمة المرور ضعيفة، لازم 6 أحرف على الأقل.',
+    OPERATION_NOT_ALLOWED: 'فعّل تسجيل الدخول بالبريد وكلمة المرور (Email/Password) من إعدادات Authentication في Firebase.',
+    TOO_MANY_ATTEMPTS_TRY_LATER: 'محاولات كتير، استنى شوية وجرّب تاني.',
+    API_KEY_INVALID: 'مفتاح apiKey غير صحيح، راجع الإعدادات.',
+    PERMISSION: 'مفيش صلاحية. راجع قواعد (Rules) قاعدة البيانات في Firebase.',
+    NETWORK: 'مفيش اتصال بالإنترنت حاليًا، هتتزامن لما يرجع الاتصال.'
+  };
+  function errText(e) {
+    var m = String((e && e.message) || e || '');
+    var k = m.split(' ')[0];
+    if (ERR[m]) return ERR[m];
+    if (ERR[k]) return ERR[k];
+    if (/API key not valid|API_KEY/i.test(m)) return ERR.API_KEY_INVALID;
+    return 'حصلت مشكلة: ' + m;
+  }
+  function jfetch(url, opts) {
+    return fetch(url, opts).then(function (r) {
+      return r.text().then(function (t) {
+        var j = null; try { j = t ? JSON.parse(t) : null; } catch (e) {}
+        if (!r.ok) {
+          var msg = (j && j.error && (j.error.message || j.error)) || ('HTTP ' + r.status);
+          if (r.status === 401 || r.status === 403) { if (typeof msg !== 'string' || /permission|auth/i.test(msg)) msg = 'PERMISSION'; }
+          throw new Error(typeof msg === 'string' ? msg : 'HTTP ' + r.status);
+        }
+        return j;
+      });
+    }, function () { throw new Error('NETWORK'); });
+  }
+  function signIn(kind, email, pass) {
+    var c = cfg();
+    return jfetch('https://identitytoolkit.googleapis.com/v1/accounts:' + kind + '?key=' + encodeURIComponent(c.apiKey), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, password: pass, returnSecureToken: true })
+    }).then(function (r) {
+      lsSet(AK, { email: r.email || email, uid: r.localId, idToken: r.idToken, refreshToken: r.refreshToken, exp: Date.now() + (+r.expiresIn || 3600) * 1000 });
+    });
+  }
+  function token() {
+    var a = auth();
+    if (!a) return Promise.reject(new Error('NOAUTH'));
+    if (a.exp - Date.now() > 60000) return Promise.resolve(a);
+    return jfetch('https://securetoken.googleapis.com/v1/token?key=' + encodeURIComponent(cfg().apiKey), {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(a.refreshToken)
+    }).then(function (r) {
+      a.idToken = r.id_token; a.refreshToken = r.refresh_token; a.uid = r.user_id || a.uid;
+      a.exp = Date.now() + (+r.expires_in || 3600) * 1000;
+      lsSet(AK, a);
+      return a;
+    }, function (e) {
+      if (/TOKEN_EXPIRED|INVALID_REFRESH_TOKEN|USER_NOT_FOUND|USER_DISABLED/.test(e.message)) { lsSet(AK, null); renderFb(); throw new Error('انتهت الجلسة، سجّل الدخول من جديد.'); }
+      throw e;
+    });
+  }
+  function url(a) { return cfg().databaseURL.replace(/\/+$/, '') + '/users/' + encodeURIComponent(a.uid) + '/backup.json?auth=' + encodeURIComponent(a.idToken); }
+  function remoteGet(a) { return jfetch(url(a), { method: 'GET' }); }
+  function push(a, minStamp) {
+    var stamp = Math.max(db.updatedAt || 0, minStamp || 0) || Date.now();
+    if (stamp !== db.updatedAt) { db.updatedAt = stamp; rawSave(); }
+    return jfetch(url(a), { method: 'PUT', body: JSON.stringify({ updatedAt: stamp, json: JSON.stringify(db) }) }).then(function () {
+      lsSet(LK, stamp);
+      status('تمت المزامنة ' + timeStr());
+    });
+  }
+  function pull(rem) {
+    var o = JSON.parse(rem.json);
+    var ok = o && Array.isArray(o.subjects) && o.subjects.length && o.subjects.every(function (s) { return s && Array.isArray(s.students) && Array.isArray(s.sessions); });
+    if (!ok) throw new Error('البيانات على السحابة غير صالحة.');
+    db = o; db.updatedAt = rem.updatedAt;
+    if (!db.current) db.current = db.subjects[0].id;
+    state = cur(); currentSession = null;
+    rawSave(); lsSet(LK, rem.updatedAt);
+    refresh();
+    status('تم تحديث البيانات من السحابة ' + timeStr());
+  }
+  function showConflict(a, rem) {
+    conflictOn = true;
+    var box = $('fbConflict'); box.classList.remove('hidden');
+    pending = { a: a, rem: rem };
+  }
+  function hideConflict() { conflictOn = false; pending = null; $('fbConflict').classList.add('hidden'); }
+  function sync() {
+    clearTimeout(timer);
+    if (!auth() || !cfg()) return Promise.resolve();
+    if (conflictOn) return Promise.resolve();
+    if (running) { again = true; return Promise.resolve(); }
+    running = true; status('جاري المزامنة...');
+    return token().then(function (a) {
+      return remoteGet(a).then(function (rem) {
+        var last = lsGet(LK) || 0, local = db.updatedAt || 0;
+        if (!rem || !rem.json) return push(a);
+        var localChanged = local > last, remChanged = (rem.updatedAt || 0) > last;
+        if (!remChanged && !localChanged) { status('البيانات محدّثة ' + timeStr()); return; }
+        if (!remChanged) return push(a);
+        if (!localChanged || !hasData()) return pull(rem);
+        if (local === rem.updatedAt) { lsSet(LK, local); status('البيانات محدّثة ' + timeStr()); return; }
+        status('البيانات اتغيّرت على جهازين، اختار النسخة اللي تكمّل بيها.');
+        showConflict(a, rem);
+      });
+    }).catch(function (e) { status(errText(e)); })
+      .then(function () { running = false; if (again) { again = false; setTimeout(sync, 300); } });
+  }
+  function renderFb() {
+    var p = $('fbPanel'); if (!p) return;
+    if (window.claude) { p.classList.add('hidden'); return; }
+    var c = cfg(), a = auth();
+    $('fbCfgBox').classList.toggle('hidden', !!c);
+    $('fbLoginBox').classList.toggle('hidden', !c || !!a);
+    $('fbOnBox').classList.toggle('hidden', !c || !a);
+    if (a) $('fbWho').textContent = 'مسجّل الدخول بـ: ' + a.email;
+    if (!c) status('المزامنة غير مفعّلة.');
+    else if (!a) status('سجّل الدخول (أو أنشئ حساب) عشان تتزامن بياناتك.');
+  }
+  function bind() {
+    var p = $('fbPanel'); if (!p) return;
+    $('fbCfgSave').addEventListener('click', function () {
+      var t = $('fbCfgTa').value;
+      var k = /apiKey["']?\s*[:=]\s*["']([^"']+)["']/.exec(t), d = /databaseURL["']?\s*[:=]\s*["']([^"']+)["']/.exec(t);
+      if (!k || !d) { status('مش لاقي apiKey أو databaseURL في النص. انسخ الإعدادات كاملة من Firebase.'); return; }
+      lsSet(CK, { apiKey: k[1].trim(), databaseURL: d[1].trim() });
+      $('fbCfgTa').value = '';
+      renderFb();
+    });
+    $('fbCfgReset').addEventListener('click', function () { lsSet(CK, null); renderFb(); });
+    function login(kind) {
+      var em = $('fbEmail').value.trim(), pw = $('fbPass').value;
+      if (!em || !pw) { status('اكتب البريد وكلمة المرور.'); return; }
+      status('جاري تسجيل الدخول...');
+      signIn(kind, em, pw).then(function () { $('fbPass').value = ''; renderFb(); return sync(); }, function (e) { status(errText(e)); });
+    }
+    $('fbIn').addEventListener('click', function () { login('signInWithPassword'); });
+    $('fbUp').addEventListener('click', function () { login('signUp'); });
+    $('fbSyncBtn').addEventListener('click', function () { sync(); });
+    $('fbOut').addEventListener('click', function () { lsSet(AK, null); lsSet(LK, null); hideConflict(); renderFb(); });
+    $('fbUseCloud').addEventListener('click', function () {
+      if (!pending) return; var r = pending.rem;
+      try { pull(r); } catch (e) { status(errText(e)); }
+      hideConflict();
+    });
+    $('fbUseLocal').addEventListener('click', function () {
+      if (!pending) return; var a = pending.a, r = pending.rem;
+      hideConflict(); running = true;
+      push(a, (r.updatedAt || 0) + 1).catch(function (e) { status(errText(e)); }).then(function () { running = false; });
+    });
+    window.fbAfterSave = function () { if (auth() && cfg() && !conflictOn) { clearTimeout(timer); timer = setTimeout(sync, 2500); } };
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) sync(); });
+    window.addEventListener('online', function () { sync(); });
+    setInterval(function () { if (!document.hidden) sync(); }, 60000);
+    renderFb();
+    sync();
+  }
+  return { bind: bind, sync: sync };
+})();
+
 $('sDate').value = new Date().toISOString().slice(0, 10);
 refresh();
+FB.bind();
 </script>
 <script>if('serviceWorker' in navigator && location.protocol.indexOf('http')===0){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}</script>
 </body>
